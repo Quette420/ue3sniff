@@ -1,0 +1,13 @@
+# Build output
+/ue3sniff
+*.exe
+/dist/
+
+# Captures and session material - never commit these
+*.pcap
+*.pcapng
+*.key
+
+# Editors
+.idea/
+.vscode/

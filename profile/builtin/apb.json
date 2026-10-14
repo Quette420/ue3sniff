@@ -1,0 +1,67 @@
+{
+  "name": "APB Reloaded",
+  "description": "APB Reloaded world server traffic (layout and field tables cross-checked against APBEMU).",
+  "layout": {
+    "packet_id_bits": 16,
+    "header_skip_bits": 14,
+    "ack_has_id_flag": true,
+    "ack_id_bits": 30,
+    "channel_index_bits": 10,
+    "sequence_bits": 10,
+    "channel_type_bits": 3,
+    "bunch_size_bits": 12
+  },
+  "cipher": { "algorithm": "btea", "rounds": 6 },
+  "channel_types": {
+    "0": "None",
+    "1": "Control",
+    "2": "Actor",
+    "3": "File",
+    "4": "Voice"
+  },
+  "channels": {
+    "2": "PlayerController"
+  },
+  "classes": {
+    "PlayerController": {
+      "field_max": 634,
+      "fields": {
+        "78":  { "name": "KnownField78", "total_bits": 66 },
+        "90":  { "name": "ServerUpdateLevelVisibility" },
+        "338": { "name": "ServerBeginCSA" },
+        "339": { "name": "ServerTestCSA" },
+        "340": { "name": "ServerCSAPredicted" },
+        "341": { "name": "ClientMispredictedCSA" },
+        "342": { "name": "ServerCSAPredictCancel" },
+        "343": {
+          "name": "ServerCSAKeyPressed",
+          "params": [
+            { "name": "InputMapping", "type": "int" },
+            { "name": "AimRotation", "type": "int" },
+            { "name": "CameraCollidePercent", "type": "float" },
+            { "name": "Target", "type": "object" }
+          ]
+        },
+        "344": { "name": "ClientResetPendingCSA" },
+        "345": {
+          "name": "ServerCSAKeyReleased",
+          "params": [
+            { "name": "InputMapping", "type": "int" }
+          ]
+        },
+        "371": { "name": "ServerSelectSpawnZone" },
+        "372": { "name": "ServerNotifyClientLoaded" },
+        "426": { "name": "ClientCompleteAutoMoveToCSA" },
+        "427": { "name": "ServerCompleteSuccessfulyAutoMoveToCSA" },
+        "484": { "name": "KnownField484", "total_bits": 168 },
+        "489": { "name": "ServerRequestCharacterData" },
+        "491": { "name": "ServerRequestCharacterStats" },
+        "498": { "name": "ServerRequestCharacterRolesData" },
+        "530": { "name": "NotifyServerLfgStateChanged", "total_bits": 21 }
+      }
+    }
+  },
+  "watch": {
+    "csa": ["338-345", "426-427"]
+  }
+}

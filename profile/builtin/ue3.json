@@ -1,0 +1,22 @@
+{
+  "name": "Unreal Engine 3 (stock)",
+  "description": "Starting point for an unmodified UE3 network stack: stock header widths, no cipher, no class tables. Copy it and fill in your game's fields.",
+  "layout": {
+    "packet_id_bits": 14,
+    "header_skip_bits": 0,
+    "ack_has_id_flag": false,
+    "ack_id_bits": 14,
+    "channel_index_bits": 10,
+    "sequence_bits": 10,
+    "channel_type_bits": 3,
+    "bunch_size_bits": 12
+  },
+  "cipher": { "algorithm": "none" },
+  "channel_types": {
+    "0": "None",
+    "1": "Control",
+    "2": "Actor",
+    "3": "File",
+    "4": "Voice"
+  }
+}

@@ -9,6 +9,48 @@ const (
 	BunchAck
 )
 
+func (k BunchKind) String() string {
+	if k == BunchAck {
+		return "ACK"
+	}
+
+	return "DATA"
+}
+
+// Layout describes the bit widths of the UE3 packet and bunch headers.
+// Games built on UE3 frequently tweak these, so they come from a profile
+// instead of being hard-coded.
+type Layout struct {
+	// PacketIDBits is the width of the packet ID at the start of the
+	// packet.
+	PacketIDBits int `json:"packet_id_bits"`
+
+	// HeaderSkipBits are skipped right after the packet ID (APB carries
+	// 14 extra bits there that are not part of the ID).
+	HeaderSkipBits int `json:"header_skip_bits"`
+
+	// AckHasIDFlag means an ACK bunch carries a presence bit before
+	// the acknowledged packet ID.
+	AckHasIDFlag bool `json:"ack_has_id_flag"`
+	AckIDBits    int  `json:"ack_id_bits"`
+
+	ChannelIndexBits int `json:"channel_index_bits"`
+	SequenceBits     int `json:"sequence_bits"`
+	ChannelTypeBits  int `json:"channel_type_bits"`
+	BunchSizeBits    int `json:"bunch_size_bits"`
+}
+
+// DefaultLayout matches stock UE3 (MAX_PACKETID=16384, MAX_CHANNELS=1023,
+// MAX_CHSEQUENCE=1024, CHTYPE_MAX=8, MaxPacket=512).
+var DefaultLayout = Layout{
+	PacketIDBits:     14,
+	AckIDBits:        14,
+	ChannelIndexBits: 10,
+	SequenceBits:     10,
+	ChannelTypeBits:  3,
+	BunchSizeBits:    12,
+}
+
 type Bunch struct {
 	Kind BunchKind
 
@@ -20,6 +62,10 @@ type Bunch struct {
 	ChannelSequence uint16
 	ChannelType     uint8
 
+	// HasChannelType is false when the header did not carry the type
+	// (unreliable bunch on an already open channel).
+	HasChannelType bool
+
 	DataBitCount  uint16
 	DataBitOffset int
 
@@ -29,10 +75,6 @@ type Bunch struct {
 }
 
 type Packet struct {
-	Valid bool
-	Error string
-
-	Prefix          uint16
 	PacketID        uint32
 	PayloadBitCount int
 
@@ -63,7 +105,9 @@ func findPayloadBitCount(data []byte) (int, error) {
 	return 0, fmt.Errorf("missing UE3 trailer marker")
 }
 
-func extractBits(
+// ExtractBits copies bitCount bits starting at beginBit into a new
+// LSB-first packed buffer.
+func ExtractBits(
 	data []byte,
 	beginBit int,
 	bitCount int,
@@ -83,12 +127,12 @@ func extractBits(
 	return result
 }
 
-func ParsePacket(data []byte) (Packet, error) {
+// ParsePacket parses a decrypted UDP payload using the given layout.
+func ParsePacket(data []byte, layout Layout) (Packet, error) {
 	var packet Packet
 
 	payloadBitCount, err := findPayloadBitCount(data)
 	if err != nil {
-		packet.Error = err.Error()
 		return packet, err
 	}
 
@@ -100,225 +144,58 @@ func ParsePacket(data []byte) (Packet, error) {
 		payloadBitCount,
 	)
 
-	var value uint32
-
-	// ------------------------------------------------------------
-	// Packet ID
-	// ------------------------------------------------------------
-
-	if value, err = reader.ReadBits(16); err != nil {
-		packet.Error = "truncated packet id (low)"
-		return packet, err
+	if packet.PacketID, err = reader.ReadBits(layout.PacketIDBits); err != nil {
+		return packet, fmt.Errorf("truncated packet id: %w", err)
 	}
 
-	packet.Prefix = uint16(value)
-
-	packetIDLow := value
-
-	if value, err = reader.ReadBits(14); err != nil {
-		packet.Error = "truncated packet id (high)"
-		return packet, err
+	if err := reader.Skip(layout.HeaderSkipBits); err != nil {
+		return packet, fmt.Errorf("truncated packet header: %w", err)
 	}
-
-	// APBEMU:
-	//
-	// packet.PacketId = static_cast<uint16_t>(packetIdLow);
-	//
-	// The next 14 bits are NOT part of the client packet ID.
-	packet.PacketID = packetIDLow
-
-	// ------------------------------------------------------------
-	// Bunches
-	// ------------------------------------------------------------
 
 	for reader.Remaining() > 0 {
-		var bunch Bunch
-
-		flag, err := reader.ReadBit()
+		bunch, err := parseBunch(reader, layout)
 		if err != nil {
-			packet.Error = "truncated ACK/data flag"
 			return packet, err
 		}
 
-		if flag {
-			// ----------------------------------------------------
-			// ACK
-			// ----------------------------------------------------
-
-			bunch.Kind = BunchAck
-
-			hasAckID, err := reader.ReadBit()
-			if err != nil {
-				packet.Error = "truncated ACK id presence flag"
-				return packet, err
-			}
-
-			if hasAckID {
-				ackID, err := reader.ReadBits(30)
-				if err != nil {
-					packet.Error = "truncated ACK packet id"
-					return packet, err
-				}
-
-				bunch.AckPacketID = ackID
-			}
-
-			packet.Bunches = append(
-				packet.Bunches,
-				bunch,
-			)
-
-			continue
-		}
-
-		// --------------------------------------------------------
-		// DATA
-		// --------------------------------------------------------
-
-		bunch.Kind = BunchData
-
-		hasOpenClose, err := reader.ReadBit()
-		if err != nil {
-			packet.Error = "truncated open/close presence flag"
-			return packet, err
-		}
-
-		if hasOpenClose {
-			if bunch.Open, err = reader.ReadBit(); err != nil {
-				packet.Error = "truncated open flag"
-				return packet, err
-			}
-
-			if bunch.Close, err = reader.ReadBit(); err != nil {
-				packet.Error = "truncated close flag"
-				return packet, err
-			}
-		}
-
-		if bunch.Reliable, err = reader.ReadBit(); err != nil {
-			packet.Error = "truncated reliability flag"
-			return packet, err
-		}
-
-		// Channel index
-
-		value, err = reader.ReadBits(10)
-		if err != nil {
-			packet.Error = "truncated channel index"
-			return packet, err
-		}
-
-		bunch.ChannelIndex = uint16(value)
-
-		// Reliable sequence
-
-		if bunch.Reliable {
-			value, err = reader.ReadBits(10)
-			if err != nil {
-				packet.Error = "truncated channel sequence"
-				return packet, err
-			}
-
-			bunch.ChannelSequence = uint16(value)
-		}
-
-		// Channel type
-
-		if bunch.Reliable || bunch.Open {
-			value, err = reader.ReadBits(3)
-			if err != nil {
-				packet.Error = "truncated channel type"
-				return packet, err
-			}
-
-			bunch.ChannelType = uint8(value)
-		}
-
-		// Data length
-
-		value, err = reader.ReadBits(12)
-		if err != nil {
-			packet.Error = "truncated bunch data length"
-			return packet, err
-		}
-
-		bunch.DataBitCount = uint16(value)
-		bunch.DataBitOffset = reader.Tell()
-
-		if int(bunch.DataBitCount) > reader.Remaining() {
-			packet.Error = fmt.Sprintf(
-				"bunch data exceeds packet payload: data=%d remaining=%d",
-				bunch.DataBitCount,
-				reader.Remaining(),
-			)
-
-			return packet, fmt.Errorf("%s", packet.Error)
-		}
-
-		// Extract raw bunch payload.
-
-		bunch.RawData = extractBits(
-			reader.Data(),
-			bunch.DataBitOffset,
-			int(bunch.DataBitCount),
-		)
-
-		// Advance over bunch data.
-
-		if err := reader.Skip(int(bunch.DataBitCount)); err != nil {
-			packet.Error = "failed to advance over bunch data"
-			return packet, err
-		}
-
-		packet.Bunches = append(
-			packet.Bunches,
-			bunch,
-		)
+		packet.Bunches = append(packet.Bunches, bunch)
 	}
-
-	packet.Valid = true
 
 	return packet, nil
 }
 
-func parseBunch(reader *BitReader) (Bunch, error) {
-	var bunch Bunch
-
-	flag, err := reader.ReadBit()
+func parseBunch(reader *BitReader, layout Layout) (Bunch, error) {
+	isAck, err := reader.ReadBit()
 	if err != nil {
-		return bunch, fmt.Errorf(
-			"truncated ACK/data flag: %w",
-			err,
-		)
+		return Bunch{}, fmt.Errorf("truncated ACK/data flag: %w", err)
 	}
 
-	if flag {
-		return parseAckBunch(reader)
+	if isAck {
+		return parseAckBunch(reader, layout)
 	}
 
-	return parseDataBunch(reader)
+	return parseDataBunch(reader, layout)
 }
 
-func parseAckBunch(reader *BitReader) (Bunch, error) {
+func parseAckBunch(reader *BitReader, layout Layout) (Bunch, error) {
 	bunch := Bunch{
 		Kind: BunchAck,
 	}
 
-	hasID, err := reader.ReadBit()
-	if err != nil {
-		return bunch, fmt.Errorf(
-			"truncated ACK presence flag: %w",
-			err,
-		)
+	hasID := true
+
+	if layout.AckHasIDFlag {
+		var err error
+
+		if hasID, err = reader.ReadBit(); err != nil {
+			return bunch, fmt.Errorf("truncated ACK id presence flag: %w", err)
+		}
 	}
 
 	if hasID {
-		id, err := reader.ReadBits(30)
+		id, err := reader.ReadBits(layout.AckIDBits)
 		if err != nil {
-			return bunch, fmt.Errorf(
-				"truncated ACK packet id: %w",
-				err,
-			)
+			return bunch, fmt.Errorf("truncated ACK packet id: %w", err)
 		}
 
 		bunch.AckPacketID = id
@@ -327,133 +204,59 @@ func parseAckBunch(reader *BitReader) (Bunch, error) {
 	return bunch, nil
 }
 
-func readerData(r *BitReader) []byte {
-	return r.Data()
-}
-
-func parseDataBunch(reader *BitReader) (Bunch, error) {
+func parseDataBunch(reader *BitReader, layout Layout) (Bunch, error) {
 	bunch := Bunch{
 		Kind: BunchData,
 	}
 
-	start := reader.Tell()
-
 	hasOpenClose, err := reader.ReadBit()
 	if err != nil {
-		return bunch, fmt.Errorf(
-			"truncated open/close flag: %w",
-			err,
-		)
+		return bunch, fmt.Errorf("truncated open/close presence flag: %w", err)
 	}
-
-	fmt.Printf(
-		"    DATA start=%d openClose=%v\n",
-		start,
-		hasOpenClose,
-	)
 
 	if hasOpenClose {
-		bunch.Open, err = reader.ReadBit()
-		if err != nil {
-			return bunch, fmt.Errorf(
-				"truncated open flag: %w",
-				err,
-			)
+		if bunch.Open, err = reader.ReadBit(); err != nil {
+			return bunch, fmt.Errorf("truncated open flag: %w", err)
 		}
 
-		bunch.Close, err = reader.ReadBit()
-		if err != nil {
-			return bunch, fmt.Errorf(
-				"truncated close flag: %w",
-				err,
-			)
+		if bunch.Close, err = reader.ReadBit(); err != nil {
+			return bunch, fmt.Errorf("truncated close flag: %w", err)
 		}
 	}
 
-	bunch.Reliable, err = reader.ReadBit()
-	if err != nil {
-		return bunch, fmt.Errorf(
-			"truncated reliable flag: %w",
-			err,
-		)
+	if bunch.Reliable, err = reader.ReadBit(); err != nil {
+		return bunch, fmt.Errorf("truncated reliability flag: %w", err)
 	}
 
-	fmt.Printf(
-		"    open=%v close=%v reliable=%v pos=%d\n",
-		bunch.Open,
-		bunch.Close,
-		bunch.Reliable,
-		reader.Tell(),
-	)
-
-	channel, err := reader.ReadBits(10)
+	value, err := reader.ReadBits(layout.ChannelIndexBits)
 	if err != nil {
-		return bunch, fmt.Errorf(
-			"truncated channel index: %w",
-			err,
-		)
+		return bunch, fmt.Errorf("truncated channel index: %w", err)
 	}
 
-	bunch.ChannelIndex = uint16(channel)
-
-	fmt.Printf(
-		"    channel=%d pos=%d\n",
-		bunch.ChannelIndex,
-		reader.Tell(),
-	)
+	bunch.ChannelIndex = uint16(value)
 
 	if bunch.Reliable {
-		sequence, err := reader.ReadBits(10)
-		if err != nil {
-			return bunch, fmt.Errorf(
-				"truncated channel sequence: %w",
-				err,
-			)
+		if value, err = reader.ReadBits(layout.SequenceBits); err != nil {
+			return bunch, fmt.Errorf("truncated channel sequence: %w", err)
 		}
 
-		bunch.ChannelSequence = uint16(sequence)
-
-		fmt.Printf(
-			"    sequence=%d pos=%d\n",
-			bunch.ChannelSequence,
-			reader.Tell(),
-		)
+		bunch.ChannelSequence = uint16(value)
 	}
 
 	if bunch.Reliable || bunch.Open {
-		channelType, err := reader.ReadBits(3)
-		if err != nil {
-			return bunch, fmt.Errorf(
-				"truncated channel type: %w",
-				err,
-			)
+		if value, err = reader.ReadBits(layout.ChannelTypeBits); err != nil {
+			return bunch, fmt.Errorf("truncated channel type: %w", err)
 		}
 
-		bunch.ChannelType = uint8(channelType)
-
-		fmt.Printf(
-			"    channelType=%d pos=%d\n",
-			bunch.ChannelType,
-			reader.Tell(),
-		)
+		bunch.ChannelType = uint8(value)
+		bunch.HasChannelType = true
 	}
 
-	dataBits, err := reader.ReadBits(12)
-	if err != nil {
-		return bunch, fmt.Errorf(
-			"truncated bunch data length: %w",
-			err,
-		)
+	if value, err = reader.ReadBits(layout.BunchSizeBits); err != nil {
+		return bunch, fmt.Errorf("truncated bunch data length: %w", err)
 	}
 
-	bunch.DataBitCount = uint16(dataBits)
-
-	fmt.Printf(
-		"    dataBits=%d pos=%d remaining=%d\n",
-		bunch.DataBitCount,
-		reader.Tell(),
-		reader.Remaining(),
-	)
+	bunch.DataBitCount = uint16(value)
 	bunch.DataBitOffset = reader.Tell()
 
 	if int(bunch.DataBitCount) > reader.Remaining() {
@@ -464,17 +267,14 @@ func parseDataBunch(reader *BitReader) (Bunch, error) {
 		)
 	}
 
-	bunch.RawData = extractBits(
-		readerData(reader),
+	bunch.RawData = ExtractBits(
+		reader.Data(),
 		bunch.DataBitOffset,
 		int(bunch.DataBitCount),
 	)
 
 	if err := reader.Skip(int(bunch.DataBitCount)); err != nil {
-		return bunch, fmt.Errorf(
-			"failed to skip bunch data: %w",
-			err,
-		)
+		return bunch, fmt.Errorf("failed to advance over bunch data: %w", err)
 	}
 
 	return bunch, nil

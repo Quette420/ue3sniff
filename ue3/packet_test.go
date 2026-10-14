@@ -2,6 +2,18 @@ package ue3
 
 import "testing"
 
+// apbLayout mirrors profiles/apb.json.
+var apbLayout = Layout{
+	PacketIDBits:     16,
+	HeaderSkipBits:   14,
+	AckHasIDFlag:     true,
+	AckIDBits:        30,
+	ChannelIndexBits: 10,
+	SequenceBits:     10,
+	ChannelTypeBits:  3,
+	BunchSizeBits:    12,
+}
+
 func TestParseAPBEMUFixture(t *testing.T) {
 	data := []byte{
 		0x00, 0x00, 0x00, 0x80, 0x05, 0x20, 0x80, 0x60,
@@ -17,17 +29,9 @@ func TestParseAPBEMUFixture(t *testing.T) {
 		0x10, 0x0E, 0x11, 0x40,
 	}
 
-	packet, err := ParsePacket(data)
+	packet, err := ParsePacket(data, apbLayout)
 	if err != nil {
 		t.Fatalf("ParsePacket failed: %v", err)
-	}
-
-	if !packet.Valid {
-		t.Fatalf("packet is invalid: %s", packet.Error)
-	}
-
-	if packet.Prefix != 0 {
-		t.Fatalf("Prefix = %d, want 0", packet.Prefix)
 	}
 
 	if packet.PacketID != 0 {

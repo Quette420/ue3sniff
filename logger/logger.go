@@ -2,7 +2,7 @@ package logger
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"time"
 )
@@ -18,31 +18,34 @@ const (
 
 type Logger struct {
 	level Level
+	out   io.Writer
 }
 
-func New(level string) *Logger {
+func New(level string, out io.Writer) (*Logger, error) {
+	l := &Logger{out: out}
+
 	switch strings.ToLower(level) {
 	case "error":
-		return &Logger{level: Error}
+		l.level = Error
 
 	case "info":
-		return &Logger{level: Info}
+		l.level = Info
 
 	case "debug":
-		return &Logger{level: Debug}
+		l.level = Debug
 
 	case "trace":
-		return &Logger{level: Trace}
+		l.level = Trace
 
 	default:
-		fmt.Fprintf(
-			os.Stderr,
-			"unknown log level %q, using info\n",
-			level,
-		)
-
-		return &Logger{level: Info}
+		return nil, fmt.Errorf("unknown log level %q (error, info, debug, trace)", level)
 	}
+
+	return l, nil
+}
+
+func (l *Logger) Enabled(level Level) bool {
+	return level <= l.level
 }
 
 func (l *Logger) Error(format string, args ...any) {
@@ -74,7 +77,7 @@ func (l *Logger) log(
 	timestamp := time.Now().Format("15:04:05.000")
 
 	fmt.Fprintf(
-		os.Stdout,
+		l.out,
 		"[%s] %-5s %s\n",
 		timestamp,
 		name,
